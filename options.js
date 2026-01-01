@@ -10,6 +10,8 @@ function ruleTemplate() {
     id: uid(),
     enabled: true,
     country: "Israel",
+    nickname: "Israel",
+    emoji: "",
     iso2: "IL",
     keywords: ["israel", "tel aviv", "jerusalem"],
     scanBio: false
@@ -74,6 +76,12 @@ function renderRules(rules) {
         el("label", {}, "Country"),
         el("input", { type: "text", class: "country", value: r.country || "" }),
 
+        el("label", {}, "Nickname (counter label)"),
+        el("input", { type: "text", class: "nickname", value: r.nickname || "" }),
+
+        el("label", {}, "Emoji (optional)"),
+        el("input", { type: "text", class: "emoji", value: r.emoji || "", maxlength: 4 }),
+
         el("label", {}, "ISO2"),
         el("input", { type: "text", class: "iso2", value: (r.iso2 || "").toUpperCase() }),
 
@@ -114,6 +122,8 @@ async function save() {
       id,
       enabled: b.querySelector(".enabled").checked,
       country: b.querySelector(".country").value.trim(),
+      nickname: b.querySelector(".nickname").value.trim(),
+      emoji: b.querySelector(".emoji").value.trim(),
       iso2: b.querySelector(".iso2").value.trim().toUpperCase(),
       keywords: parseKeywords(b.querySelector(".keywords").value),
       scanBio: b.querySelector(".scanBio").checked

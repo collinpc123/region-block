@@ -20,11 +20,25 @@ chrome.runtime.onInstalled.addListener(async () => {
 
   // seed defaults if missing
   const sync = await chrome.storage.sync.get({
-    [RULES_KEY]: [],
+    [RULES_KEY]: null,
     [PREFS_KEY]: { debug: false, logOnce: true, blockUnresolved: false }
   });
   if (!Array.isArray(sync[RULES_KEY])) {
-    await chrome.storage.sync.set({ [RULES_KEY]: [] });
+    try {
+      const resp = await fetch(chrome.runtime.getURL("default_config.json"));
+      const defaults = await resp.json();
+      if (Array.isArray(defaults.rules)) {
+        await chrome.storage.sync.set({ [RULES_KEY]: defaults.rules });
+      } else {
+        await chrome.storage.sync.set({ [RULES_KEY]: [] });
+      }
+      if (defaults.prefs) {
+        await chrome.storage.sync.set({ [PREFS_KEY]: defaults.prefs });
+      }
+    } catch (e) {
+      bgWarn("failed to load default_config.json", e);
+      await chrome.storage.sync.set({ [RULES_KEY]: [] });
+    }
   }
 });
 
@@ -57,16 +71,16 @@ function isFresh(entry) {
 
 async function getStats() {
   const res = await chrome.storage.local.get({
-    [STATS_KEY]: { totalBlocked: 0, byCountry: {}, byRuleId: {} }
+    [STATS_KEY]: { totalBlocked: 0, byCountry: {}, byRuleId: {}, ruleMeta: {} }
   });
-  return res[STATS_KEY] || { totalBlocked: 0, byCountry: {}, byRuleId: {} };
+  return res[STATS_KEY] || { totalBlocked: 0, byCountry: {}, byRuleId: {}, ruleMeta: {} };
 }
 
 async function setStats(stats) {
   await chrome.storage.local.set({ [STATS_KEY]: stats });
 }
 
-async function incBlock({ country, ruleId }) {
+async function incBlock({ country, ruleId, nickname, iso2 }) {
   const stats = await getStats();
   stats.totalBlocked = (stats.totalBlocked || 0) + 1;
 
@@ -77,7 +91,20 @@ async function incBlock({ country, ruleId }) {
   if (ruleId) {
     stats.byRuleId ||= {};
     stats.byRuleId[ruleId] = (stats.byRuleId[ruleId] || 0) + 1;
+    stats.ruleMeta ||= {};
+    stats.ruleMeta[ruleId] = {
+      ...(stats.ruleMeta[ruleId] || {}),
+      nickname: nickname || country || (stats.ruleMeta[ruleId] || {}).nickname || "",
+      country: country || (stats.ruleMeta[ruleId] || {}).country || "",
+      iso2: iso2 || (stats.ruleMeta[ruleId] || {}).iso2 || ""
+    };
   }
+  await setStats(stats);
+}
+
+async function setRuleMeta(ruleMeta) {
+  const stats = await getStats();
+  stats.ruleMeta = ruleMeta || {};
   await setStats(stats);
 }
 
@@ -119,11 +146,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await setCache(await pruneCache(cache));
         if (debug) bgLog("SET_PROFILE", { handle, hasLoc: !!location, hasBio: !!bio });
 
+        // broadcast to tabs so badges refresh without reload
+        try {
+          const tabs = await chrome.tabs.query({ url: ["*://x.com/*", "*://twitter.com/*"] });
+          for (const t of tabs) {
+            chrome.tabs.sendMessage(t.id, {
+              type: "PROFILE_UPDATED",
+              handle,
+              profile: cache[handle]
+            }).catch(() => {});
+          }
+        } catch {}
+
         return sendResponse({ ok: true });
       }
 
       if (msg?.type === "INCREMENT_BLOCK") {
-        await incBlock({ country: msg.country, ruleId: msg.ruleId });
+        await incBlock({
+          country: msg.country,
+          ruleId: msg.ruleId,
+          nickname: msg.nickname,
+          iso2: msg.iso2
+        });
+        return sendResponse({ ok: true });
+      }
+
+      if (msg?.type === "SET_RULE_META") {
+        await setRuleMeta(msg.ruleMeta || {});
         return sendResponse({ ok: true });
       }
 

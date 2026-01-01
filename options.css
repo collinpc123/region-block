@@ -22,7 +22,7 @@ body {
 }
 .rule .grid {
   display: grid;
-  grid-template-columns: 120px 1fr;
+  grid-template-columns: 140px 1fr;
   gap: 8px 12px;
   align-items: center;
 }

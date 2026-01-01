@@ -1,4 +1,8 @@
 // content_profile.js
+if (window.__BTC_PROFILE_LOADED__) {
+  console.log("[BTC-profile] already loaded");
+} else {
+  window.__BTC_PROFILE_LOADED__ = true;
 // Runs on x.com/* but does work ONLY when URL is a profile page.
 // Extracts:
 //   - location: [data-testid="UserLocation"]
@@ -47,6 +51,28 @@ function textFrom(el) {
   return (el.innerText || el.textContent || "").trim();
 }
 
+function flagEmojiToIso2(flag) {
+  if (!flag) return "";
+  const chars = Array.from(flag);
+  if (chars.length !== 2) return "";
+  const A = 0x1F1E6;
+  const cps = chars.map(c => c.codePointAt(0) || 0);
+  if (cps.some(cp => cp < A || cp > A + 25)) return "";
+  return String.fromCharCode(cps[0] - A + 65, cps[1] - A + 65);
+}
+
+function extractFlagIso2s(text) {
+  const out = new Set();
+  if (!text) return out;
+  const matches = text.match(/[\u{1F1E6}-\u{1F1FF}]{2}/gu);
+  if (!matches) return out;
+  for (const m of matches) {
+    const iso = flagEmojiToIso2(m);
+    if (iso) out.add(iso);
+  }
+  return out;
+}
+
 function extractLocation() {
   // You provided example:
   // <span data-testid="UserLocation"> ... <span>TEXT</span> </span>
@@ -67,9 +93,51 @@ function extractBio() {
   return textFrom(bioRoot);
 }
 
+const COUNTRY_SYNONYMS = {
+  "united states": "US", "usa": "US", "u.s.a": "US", "u.s.": "US", "us": "US", "america": "US",
+  "united kingdom": "GB", "uk": "GB", "u.k.": "GB", "england": "GB", "scotland": "GB", "wales": "GB", "northern ireland": "GB", "britain": "GB",
+  "israel": "IL", "tel aviv": "IL", "jerusalem": "IL",
+  "india": "IN", "bharat": "IN", "delhi": "IN",
+  "canada": "CA", "toronto": "CA",
+  "australia": "AU", "sydney": "AU", "melbourne": "AU",
+  "germany": "DE", "deutschland": "DE", "berlin": "DE",
+  "france": "FR", "paris": "FR",
+  "russia": "RU", "moscow": "RU",
+  "china": "CN", "beijing": "CN", "shanghai": "CN",
+  "japan": "JP", "tokyo": "JP",
+  "spain": "ES", "madrid": "ES", "barcelona": "ES",
+  "italy": "IT", "rome": "IT",
+  "brazil": "BR", "rio": "BR", "sao paulo": "BR",
+  "mexico": "MX", "mexico city": "MX",
+  "uae": "AE", "dubai": "AE", "abu dhabi": "AE",
+  "pakistan": "PK", "karachi": "PK", "lahore": "PK",
+  "bangladesh": "BD", "dhaka": "BD",
+  "nepal": "NP", "kathmandu": "NP",
+  "sri lanka": "LK", "colombo": "LK",
+  "south africa": "ZA", "johannesburg": "ZA",
+  "nigeria": "NG", "lagos": "NG",
+  "turkey": "TR", "türkiye": "TR", "istanbul": "TR",
+  "saudi arabia": "SA", "riyadh": "SA",
+  "iran": "IR", "tehran": "IR",
+  "ukraine": "UA", "kiev": "UA", "kyiv": "UA",
+  "ireland": "IE", "dublin": "IE",
+  "sweden": "SE", "norway": "NO", "finland": "FI", "denmark": "DK"
+};
+
+function isoFromLocationText(locationText) {
+  const flags = extractFlagIso2s(locationText);
+  for (const iso of flags) return iso;
+  const lower = (locationText || "").toLowerCase();
+  for (const [key, iso] of Object.entries(COUNTRY_SYNONYMS)) {
+    if (lower.includes(key)) return iso;
+  }
+  return "";
+}
+
 const aboutLocCache = new Map(); // handleLower -> Promise<string>
 const aboutApiPromises = new Map(); // handleLower -> Promise<string>
 let aboutScriptInjected = false;
+let aboutRateLimitUntilMs = 0;
 
 function ensureAboutScriptInjected() {
   if (aboutScriptInjected) return;
@@ -88,6 +156,7 @@ function ensureAboutScriptInjected() {
 function fetchAccountBasedLocationViaApi(handle) {
   const h = String(handle || "").toLowerCase();
   if (!h) return Promise.resolve("");
+  if (aboutRateLimitUntilMs && Date.now() < aboutRateLimitUntilMs) return Promise.resolve("");
   if (aboutApiPromises.has(h)) return aboutApiPromises.get(h);
 
   ensureAboutScriptInjected();
@@ -100,6 +169,11 @@ function fetchAccountBasedLocationViaApi(handle) {
       if (msg.type === "BTC_ABOUT_RESULT" && msg.handle === h && msg.reqId === reqId) {
         window.removeEventListener("message", listener);
         console.log("[BTC-profile] about API result", { handle: h, status: msg.status, loc: msg.location, error: msg.error });
+        if (msg.isRateLimited && msg.resetTimeMs) {
+          aboutRateLimitUntilMs = msg.resetTimeMs;
+        } else if (msg.status === 429) {
+          aboutRateLimitUntilMs = Date.now() + 5 * 60 * 1000;
+        }
         resolve(msg.location || "");
       }
     };
@@ -285,47 +359,62 @@ async function runOnceAfterLoad() {
   if (!isProfile && !isAbout) return;
 
   const handle = getHandleFromPath();
-  const aboutLocPromise = isProfile ? fetchAboutBasedLocation(handle) : Promise.resolve("");
   const aboutApiPromise = isProfile ? fetchAccountBasedLocationViaApi(handle) : Promise.resolve("");
+  const aboutLocPromise = isProfile ? fetchAboutBasedLocation(handle) : Promise.resolve("");
   if (isProfile) observeAboutTooltip(handle);
 
   if (isAbout) {
     const loc = extractAccountBasedLocationFromRoot(document, true);
     const bio = extractBio();
     if (loc) {
+      const iso = isoFromLocationText(loc);
       console.log("[BTC-profile] about page scrape", { handle, loc });
-      await saveProfile(handle, { location: loc, locationIso2: loc, bio, source: "profile_about_page_dom" });
+      await saveProfile(handle, { location: loc, locationIso2: iso, bio, source: "profile_about_page_dom" });
       return;
     }
     console.log("[BTC-profile] about page found no location");
   }
 
-  // Wait for profile header area to render (X is SPA)
-  // Try a few times without infinite looping.
+  // Priority 1: About API ("account based in")
+  try {
+    const apiLoc = await aboutApiPromise;
+    if (apiLoc) {
+      const bio = extractBio();
+      const iso = isoFromLocationText(apiLoc);
+      console.log("[BTC-profile] using about API location", { handle, apiLoc, bio_preview: (bio || "").slice(0, 80) });
+      await saveProfile(handle, { location: apiLoc, locationIso2: iso, bio, source: "profile_about_api" });
+      return;
+    }
+  } catch (e) {
+    console.log("[BTC-profile] about API failed", e);
+  }
+
+  // Priority 2: About page scrape (Account based in)
+  try {
+    const aboutLoc = await aboutLocPromise;
+    if (aboutLoc) {
+      const bio = extractBio();
+      const iso = isoFromLocationText(aboutLoc);
+      console.log("[BTC-profile] using about page location", { handle, aboutLoc, bio_preview: (bio || "").slice(0, 80) });
+      await saveProfile(handle, { location: aboutLoc, locationIso2: iso, bio, source: "profile_about_page" });
+      return;
+    }
+  } catch (e) {
+    console.log("[BTC-profile] about-page fetch failed", e);
+  }
+
+  // Priority 3: DOM scrape (location/bio) if about sources failed or rate limited
   for (let attempt = 0; attempt < 20; attempt++) {
     const loc = extractAccountBasedLocation() || extractLocation();
     const bio = extractBio();
 
     if (loc || bio) {
       console.log("[BTC-profile] scraped", { handle, loc, bio_preview: (bio || "").slice(0, 80) });
-      await saveProfile(handle, { location: loc, bio, source: "profile_dom" });
+      const iso = isoFromLocationText(loc);
+      await saveProfile(handle, { location: loc, locationIso2: iso, bio, source: "profile_dom" });
       return;
     }
     await new Promise(r => setTimeout(r, 300));
-  }
-
-  // Final fallback: use about page if we got it.
-  try {
-    const [aboutLoc, apiLoc] = await Promise.all([aboutLocPromise, aboutApiPromise]);
-    const best = apiLoc || aboutLoc;
-    if (best) {
-      const bio = extractBio();
-      console.log("[BTC-profile] using about/api location", { handle, best, bio_preview: (bio || "").slice(0, 80) });
-      await saveProfile(handle, { location: best, locationIso2: best, bio, source: "profile_about_page" });
-      return;
-    }
-  } catch (e) {
-    console.log("[BTC-profile] about-page fetch failed", e);
   }
 
   console.log("[BTC-profile] no location/bio found after retries", { handle });
@@ -358,3 +447,5 @@ const accountDialogObserver = new MutationObserver(() => {
 });
 console.log("[BTC-profile] observing for account-based location dialog");
 accountDialogObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+}
