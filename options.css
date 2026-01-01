@@ -1,0 +1,36 @@
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  margin: 20px;
+  max-width: 900px;
+}
+.card {
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin: 14px 0;
+}
+.row {
+  display: flex;
+  gap: 10px;
+  margin: 8px 0;
+}
+.rule {
+  border: 1px solid #eee;
+  border-radius: 10px;
+  padding: 10px;
+  margin: 10px 0;
+}
+.rule .grid {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px 12px;
+  align-items: center;
+}
+input[type="text"] {
+  width: 100%;
+  padding: 6px 8px;
+}
+.muted { color: #555; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
+button { padding: 6px 10px; }
+.small { font-size: 12px; }

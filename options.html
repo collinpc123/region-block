@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Block Tweets by Country - Options</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <h1>Block Tweets by Country (Profile Scrape)</h1>
+
+  <section class="card">
+    <h2>Rules</h2>
+    <p class="muted">
+      Rules match against <b>Profile Location</b> (and optionally Bio).
+      Location is only learned after you visit a user’s profile at least once.
+    </p>
+
+    <div class="row">
+      <button id="addRule">Add rule</button>
+      <button id="save">Save</button>
+    </div>
+
+    <div id="rules"></div>
+  </section>
+
+  <section class="card">
+    <h2>Preferences</h2>
+    <label><input type="checkbox" id="debug"> Debug logs</label><br>
+    <label><input type="checkbox" id="logOnce"> Log once per handle</label><br>
+    <label><input type="checkbox" id="blockUnresolved"> Block when location unknown (not recommended)</label>
+  </section>
+
+  <section class="card">
+    <h2>Stats</h2>
+    <div id="stats" class="mono"></div>
+    <div class="row">
+      <button id="clearCache">Clear profile cache</button>
+      <button id="refreshStats">Refresh stats</button>
+    </div>
+  </section>
+
+  <script src="options.js"></script>
+</body>
+</html>

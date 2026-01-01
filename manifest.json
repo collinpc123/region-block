@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Block Tweets by Country (Profile Scrape)",
+  "version": "1.0.0",
+  "description": "Blocks tweets based on profile location/bio. Learns location only when you visit a profile. Shows a flag badge and keeps block counts.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://x.com/*", "https://twitter.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["content_timeline.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://x.com/*", "https://twitter.com/*"],
+      "js": ["content_profile.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
