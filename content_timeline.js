@@ -20,11 +20,56 @@ function warn(...a) { if (prefs.debug) console.warn("[BTC]", ...a); }
 
 function norm(s) { return (s || "").toLowerCase(); }
 
+function flagEmojiToIso2(flag) {
+  if (!flag) return "";
+  const chars = Array.from(flag);
+  if (chars.length !== 2) return "";
+  const A = 0x1F1E6;
+  const codePoints = chars.map(c => c.codePointAt(0) || 0);
+  if (codePoints.some(cp => cp < A || cp > A + 25)) return "";
+  return String.fromCharCode(codePoints[0] - A + 65, codePoints[1] - A + 65);
+}
+
+function extractFlagIso2s(text) {
+  const out = new Set();
+  if (!text) return out;
+  const matches = text.match(/[\u{1F1E6}-\u{1F1FF}]{2}/gu);
+  if (!matches) return out;
+  for (const m of matches) {
+    const iso = flagEmojiToIso2(m);
+    if (iso) out.add(iso);
+  }
+  return out;
+}
+
 function iso2ToFlag(iso2) {
   const code = (iso2 || "").toUpperCase().trim();
   if (!/^[A-Z]{2}$/.test(code)) return "🏳️";
   const A = 0x1F1E6;
   return String.fromCodePoint(A + (code.charCodeAt(0) - 65), A + (code.charCodeAt(1) - 65));
+}
+
+function flagImgEl(iso2, className) {
+  const iso = String(iso2 || "").trim().toLowerCase();
+  if (/^[a-z]{2}$/.test(iso)) {
+    const img = document.createElement("img");
+    img.src = `https://flagcdn.com/48x36/${iso}.png`;
+    img.alt = `${iso.toUpperCase()} flag`;
+    img.className = className;
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    img.onerror = () => {
+      const fallback = document.createElement("span");
+      fallback.className = className.replace("img", "flag");
+      fallback.textContent = iso2ToFlag(iso2);
+      img.replaceWith(fallback);
+    };
+    return img;
+  }
+  const span = document.createElement("span");
+  span.className = className.replace("img", "flag");
+  span.textContent = iso2ToFlag(iso2);
+  return span;
 }
 
 function ensureStyle() {
@@ -33,7 +78,8 @@ function ensureStyle() {
   style.id = "btc-country-style";
   style.textContent = `
     .btc-flag-badge{display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:1px 7px;border:1px solid rgba(120,120,120,.35);border-radius:999px;font-size:12px;line-height:16px;user-select:none;opacity:.95}
-    .btc-flag{font-size:14px;line-height:14px}
+    .btc-flag-img{width:18px;height:14px;object-fit:cover;display:inline-block;vertical-align:middle}
+    .btc-block-flag-img{width:26px;height:18px;object-fit:cover;margin-left:6px;vertical-align:middle;display:inline-block}
     .btc-country{font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .btc-blocked-placeholder{border:1px dashed rgba(120,120,120,.5);border-radius:16px;padding:10px 12px;margin:8px 0;display:flex;align-items:center;justify-content:space-between;gap:12px}
     .btc-blocked-left{display:flex;align-items:center;gap:10px;min-width:0}
@@ -60,6 +106,12 @@ function ruleMatches(rule, locationText, bioText) {
 
   const country = norm(rule.country);
   const keywords = (rule.keywords || []).map(norm);
+  const iso2 = (rule.iso2 || "").toUpperCase();
+
+  const locIso2s = extractFlagIso2s(locationText);
+  const bioIso2s = extractFlagIso2s(bioText);
+
+  if (iso2 && (locIso2s.has(iso2) || (rule.scanBio && bioIso2s.has(iso2)))) return true;
 
   if (country && loc.includes(country)) return true;
   for (const k of keywords) if (k && loc.includes(k)) return true;
@@ -97,6 +149,30 @@ function getHandleFromTweet(articleEl) {
   return null;
 }
 
+function getTweetId(articleEl) {
+  const links = articleEl.querySelectorAll('a[href*="/status/"]');
+  for (const a of links) {
+    const href = a.getAttribute("href") || "";
+    const m = href.match(/\/status\/(\d{5,})/);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+function resetArticleState(articleEl) {
+  if (articleEl.dataset.btcBlocked === "1") {
+    articleEl.style.display = "";
+    const prev = articleEl.previousElementSibling;
+    if (prev && prev.classList?.contains("btc-blocked-placeholder")) prev.remove();
+  }
+  delete articleEl.dataset.btcTweetId;
+  delete articleEl.dataset.btcBlocked;
+  delete articleEl.dataset.btcApplied;
+  delete articleEl.dataset.btcChecked;
+  delete articleEl.dataset.btcPending;
+  delete articleEl.dataset.btcRetryCount;
+}
+
 function addOrUpdateBadge(articleEl, countryName, iso2, hint) {
   const nameBlock = articleEl.querySelector('div[data-testid="User-Name"]');
   if (!nameBlock) return;
@@ -105,10 +181,13 @@ function addOrUpdateBadge(articleEl, countryName, iso2, hint) {
   if (!badge) {
     badge = document.createElement("span");
     badge.className = "btc-flag-badge";
-    badge.innerHTML = `<span class="btc-flag"></span><span class="btc-country"></span>`;
+    badge.innerHTML = `<span class="btc-country"></span>`;
     nameBlock.appendChild(badge);
   }
-  badge.querySelector(".btc-flag").textContent = iso2ToFlag(iso2);
+  const existingFlag = badge.querySelector(".btc-flag-img, .btc-flag");
+  if (existingFlag) existingFlag.remove();
+  const flagEl = flagImgEl(iso2, "btc-flag-img");
+  badge.prepend(flagEl);
   badge.querySelector(".btc-country").textContent = countryName || "Unknown";
   badge.title = hint || "";
 }
@@ -125,14 +204,23 @@ function blockWithPlaceholder(articleEl, rule, handle, locationText) {
 
   const badge = document.createElement("span");
   badge.className = "btc-flag-badge";
-  badge.innerHTML = `<span class="btc-flag">${iso2ToFlag(rule.iso2)}</span><span class="btc-country">${rule.country || "Unknown"}</span>`;
+  const flagElSmall = flagImgEl(rule.iso2, "btc-flag-img");
+  const countrySpan = document.createElement("span");
+  countrySpan.className = "btc-country";
+  countrySpan.textContent = rule.country || "Unknown";
+  badge.append(flagElSmall, countrySpan);
 
   const textWrap = document.createElement("div");
   textWrap.style.minWidth = "0";
-  textWrap.innerHTML = `
-    <div class="btc-blocked-title">Tweet blocked</div>
-    <div class="btc-blocked-sub">@${handle || "unknown"} • location: ${locationText || "—"}</div>
-  `;
+  const title = document.createElement("div");
+  title.className = "btc-blocked-title";
+  title.textContent = "Tweet blocked ";
+  const flagElLarge = flagImgEl(rule.iso2, "btc-block-flag-img");
+  title.appendChild(flagElLarge);
+  const sub = document.createElement("div");
+  sub.className = "btc-blocked-sub";
+  sub.textContent = `@${handle || "unknown"} • location: ${locationText || "—"}`;
+  textWrap.append(title, sub);
 
   left.appendChild(badge);
   left.appendChild(textWrap);
@@ -202,10 +290,15 @@ async function getProfile(handle) {
 }
 
 async function checkTweet(articleEl) {
-  if (articleEl.dataset.btcChecked === "1") return;
-  articleEl.dataset.btcChecked = "1";
-
   if (!rules.length) return;
+
+  const tweetId = getTweetId(articleEl);
+  const prevId = articleEl.dataset.btcTweetId || "";
+  const pending = articleEl.dataset.btcPending === "1";
+  if (tweetId && prevId === tweetId && !pending) return;
+  if ((tweetId && prevId && tweetId !== prevId) || (!tweetId && prevId)) resetArticleState(articleEl);
+  articleEl.dataset.btcTweetId = tweetId || prevId || "";
+  articleEl.dataset.btcChecked = "1";
 
   const handle = getHandleFromTweet(articleEl);
   if (!handle) return;
@@ -215,6 +308,15 @@ async function checkTweet(articleEl) {
   const profile = await getProfile(handle);
 
   if (!profile) {
+    const retries = Number(articleEl.dataset.btcRetryCount || "0");
+    if (retries < 4) {
+      articleEl.dataset.btcRetryCount = String(retries + 1);
+      articleEl.dataset.btcPending = "1";
+      setTimeout(() => checkTweet(articleEl), 1200);
+    } else {
+      delete articleEl.dataset.btcPending;
+    }
+
     // Not resolved yet: show unknown flag. User must visit profile to teach us.
     addOrUpdateBadge(
       articleEl,
@@ -231,6 +333,9 @@ async function checkTweet(articleEl) {
     maybeLog(handle, null, null, false);
     return;
   }
+
+  delete articleEl.dataset.btcPending;
+  delete articleEl.dataset.btcRetryCount;
 
   const match = findMatch(profile.location || "", profile.bio || "");
 
@@ -259,9 +364,15 @@ function observeTweets() {
   setupIO();
   const articles = document.querySelectorAll('article[role="article"]');
   for (const a of articles) {
-    if (observed.has(a)) continue;
-    observed.add(a);
-    io.observe(a);
+    const currentId = getTweetId(a);
+    const prevId = a.dataset.btcTweetId || "";
+    if (!observed.has(a)) {
+      observed.add(a);
+      io.observe(a);
+    }
+    if (!currentId || !prevId || currentId !== prevId) {
+      checkTweet(a);
+    }
   }
 }
 

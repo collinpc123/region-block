@@ -33,11 +33,56 @@ function warn(...a) { if (prefs.debug) console.warn(LOG_PREFIX, ...a); }
 
 function norm(s) { return (s || "").toLowerCase(); }
 
+function flagEmojiToIso2(flag) {
+  if (!flag) return "";
+  const chars = Array.from(flag);
+  if (chars.length !== 2) return "";
+  const A = 0x1F1E6;
+  const codePoints = chars.map(c => c.codePointAt(0) || 0);
+  if (codePoints.some(cp => cp < A || cp > A + 25)) return "";
+  return String.fromCharCode(codePoints[0] - A + 65, codePoints[1] - A + 65);
+}
+
+function extractFlagIso2s(text) {
+  const out = new Set();
+  if (!text) return out;
+  const matches = text.match(/[\u{1F1E6}-\u{1F1FF}]{2}/gu);
+  if (!matches) return out;
+  for (const m of matches) {
+    const iso = flagEmojiToIso2(m);
+    if (iso) out.add(iso);
+  }
+  return out;
+}
+
 function iso2ToFlag(iso2) {
   const code = (iso2 || "").toUpperCase().trim();
   if (!/^[A-Z]{2}$/.test(code)) return "🏳️";
   const A = 0x1F1E6;
   return String.fromCodePoint(A + (code.charCodeAt(0) - 65), A + (code.charCodeAt(1) - 65));
+}
+
+function flagImgEl(iso2, className) {
+  const iso = String(iso2 || "").trim().toLowerCase();
+  if (/^[a-z]{2}$/.test(iso)) {
+    const img = document.createElement("img");
+    img.src = `https://flagcdn.com/48x36/${iso}.png`;
+    img.alt = `${iso.toUpperCase()} flag`;
+    img.className = className;
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    img.onerror = () => {
+      const fallback = document.createElement("span");
+      fallback.className = className.replace("img", "flag");
+      fallback.textContent = iso2ToFlag(iso2);
+      img.replaceWith(fallback);
+    };
+    return img;
+  }
+  const span = document.createElement("span");
+  span.className = className.replace("img", "flag");
+  span.textContent = iso2ToFlag(iso2);
+  return span;
 }
 
 async function loadRules() {
@@ -68,7 +113,8 @@ function ensureStyle() {
       user-select: none;
       opacity: 0.95;
     }
-    .btc-flag { font-size: 14px; line-height: 14px; }
+    .btc-flag-img { width: 18px; height: 14px; object-fit: cover; display: inline-block; vertical-align: middle; }
+    .btc-block-flag-img { width: 26px; height: 18px; object-fit: cover; margin-left: 6px; vertical-align: middle; display: inline-block; }
     .btc-country {
       font-size: 12px;
       max-width: 180px;
@@ -111,6 +157,12 @@ function ruleMatches(rule, locationText, bioText) {
 
   const country = norm(rule.country);
   const keywords = (rule.keywords || []).map(norm);
+  const iso2 = (rule.iso2 || "").toUpperCase();
+
+  const locIso2s = extractFlagIso2s(locationText);
+  const bioIso2s = extractFlagIso2s(bioText);
+
+  if (iso2 && (locIso2s.has(iso2) || (rule.scanBio && bioIso2s.has(iso2)))) return true;
 
   if (country && loc.includes(country)) return true;
   for (const k of keywords) if (k && loc.includes(k)) return true;
@@ -149,6 +201,29 @@ function getHandleFromTweet(articleEl) {
   return null;
 }
 
+function getTweetId(articleEl) {
+  const links = articleEl.querySelectorAll('a[href*="/status/"]');
+  for (const a of links) {
+    const href = a.getAttribute("href") || "";
+    const m = href.match(/\/status\/(\d{5,})/);
+    if (m) return m[1];
+  }
+  return "";
+}
+
+function resetArticleState(articleEl) {
+  if (articleEl.dataset.btcBlocked === "1") {
+    articleEl.style.display = "";
+    const prev = articleEl.previousElementSibling;
+    if (prev && prev.classList?.contains("btc-blocked-placeholder")) prev.remove();
+  }
+  delete articleEl.dataset.btcTweetId;
+  delete articleEl.dataset.btcBlocked;
+  delete articleEl.dataset.btcApplied;
+  delete articleEl.dataset.btcPending;
+  delete articleEl.dataset.btcRetryCount;
+}
+
 function addOrUpdateBadge(articleEl, countryName, iso2) {
   const nameBlock = articleEl.querySelector('div[data-testid="User-Name"]');
   if (!nameBlock) return;
@@ -157,11 +232,14 @@ function addOrUpdateBadge(articleEl, countryName, iso2) {
   if (!badge) {
     badge = document.createElement("span");
     badge.className = "btc-flag-badge";
-    badge.innerHTML = `<span class="btc-flag"></span><span class="btc-country"></span>`;
+    badge.innerHTML = `<span class="btc-country"></span>`;
     nameBlock.appendChild(badge);
   }
 
-  badge.querySelector(".btc-flag").textContent = iso2ToFlag(iso2);
+  const existingFlag = badge.querySelector(".btc-flag-img, .btc-flag");
+  if (existingFlag) existingFlag.remove();
+  const flagEl = flagImgEl(iso2, "btc-flag-img");
+  badge.prepend(flagEl);
   badge.querySelector(".btc-country").textContent = countryName || "Unknown";
 }
 
@@ -177,14 +255,23 @@ function blockWithPlaceholder(articleEl, countryName, iso2, handle, locationText
 
   const badge = document.createElement("span");
   badge.className = "btc-flag-badge";
-  badge.innerHTML = `<span class="btc-flag">${iso2ToFlag(iso2)}</span><span class="btc-country">${countryName || "Unknown"}</span>`;
+  const flagElSmall = flagImgEl(iso2, "btc-flag-img");
+  const countrySpan = document.createElement("span");
+  countrySpan.className = "btc-country";
+  countrySpan.textContent = countryName || "Unknown";
+  badge.append(flagElSmall, countrySpan);
 
   const textWrap = document.createElement("div");
   textWrap.style.minWidth = "0";
-  textWrap.innerHTML = `
-    <div class="btc-blocked-title">Tweet blocked</div>
-    <div class="btc-blocked-sub">@${handle || "unknown"} • location: ${locationText || "—"}</div>
-  `;
+  const title = document.createElement("div");
+  title.className = "btc-blocked-title";
+  title.textContent = "Tweet blocked ";
+  const flagElLarge = flagImgEl(iso2, "btc-block-flag-img");
+  title.appendChild(flagElLarge);
+  const sub = document.createElement("div");
+  sub.className = "btc-blocked-sub";
+  sub.textContent = `@${handle || "unknown"} • location: ${locationText || "—"}`;
+  textWrap.append(title, sub);
 
   left.appendChild(badge);
   left.appendChild(textWrap);
@@ -316,6 +403,13 @@ async function runQueue() {
 }
 
 function applyToTweet(articleEl, handleLower, prof) {
+  const tweetId = getTweetId(articleEl);
+  const prevId = articleEl.dataset.btcTweetId || "";
+  const pending = articleEl.dataset.btcPending === "1";
+  if (tweetId && prevId === tweetId && !pending) return;
+  if ((tweetId && prevId && tweetId !== prevId) || (!tweetId && prevId)) resetArticleState(articleEl);
+  articleEl.dataset.btcTweetId = tweetId || prevId || "";
+
   if (!articleEl || articleEl.dataset.btcApplied === "1") return;
   articleEl.dataset.btcApplied = "1";
 
@@ -339,9 +433,15 @@ function applyToTweet(articleEl, handleLower, prof) {
 }
 
 function observeTweet(articleEl) {
-  if (observed.has(articleEl)) return;
-  observed.add(articleEl);
-  io?.observe(articleEl);
+  const currentId = getTweetId(articleEl);
+  const prevId = articleEl.dataset.btcTweetId || "";
+  if (!observed.has(articleEl)) {
+    observed.add(articleEl);
+    io?.observe(articleEl);
+  }
+  if (!currentId || !prevId || currentId !== prevId) {
+    checkTweet(articleEl);
+  }
 }
 
 async function checkTweet(articleEl) {
