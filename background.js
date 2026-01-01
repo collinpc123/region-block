@@ -105,11 +105,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!handle) return sendResponse({ ok: false, error: "empty handle" });
 
         const location = String(msg.profile?.location || "").trim();
+        const locationIso2 = String(msg.profile?.locationIso2 || "").trim();
         const bio = String(msg.profile?.bio || "").trim();
 
         const cache = await getCache();
         cache[handle] = {
           location,
+          locationIso2,
           bio,
           ts: now(),
           source: msg.profile?.source || "profile_dom"

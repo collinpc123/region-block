@@ -11,6 +11,8 @@ const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const memProfile = new Map(); // handleLower -> {location,bio,ts}
 const memPending = new Set(); // handleLower currently requesting
 const loggedHandles = new Set();
+const aboutApiPromises = new Map(); // handleLower -> Promise<string>
+let aboutScriptInjected = false;
 
 const observed = new WeakSet();
 let io = null;
@@ -47,6 +49,51 @@ function iso2ToFlag(iso2) {
   if (!/^[A-Z]{2}$/.test(code)) return "🏳️";
   const A = 0x1F1E6;
   return String.fromCodePoint(A + (code.charCodeAt(0) - 65), A + (code.charCodeAt(1) - 65));
+}
+
+function deriveIsoFromLocation(locationText) {
+  const set = extractFlagIso2s(locationText);
+  for (const iso of set) return iso; // first match
+  return "";
+}
+
+function ensureAboutScriptInjected() {
+  if (aboutScriptInjected) return;
+  const s = document.createElement("script");
+  s.src = chrome.runtime.getURL("page_about.js");
+  s.onload = () => s.remove();
+  (document.head || document.documentElement).appendChild(s);
+  aboutScriptInjected = true;
+}
+
+function fetchAccountBasedLocationViaApi(handle) {
+  const h = String(handle || "").toLowerCase().trim();
+  if (!h) return Promise.resolve("");
+  if (aboutApiPromises.has(h)) return aboutApiPromises.get(h);
+
+  ensureAboutScriptInjected();
+
+  const reqId = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const p = new Promise((resolve) => {
+    const listener = (event) => {
+      if (event.source !== window) return;
+      const msg = event.data || {};
+      if (msg.type === "BTC_ABOUT_RESULT" && msg.handle === h && msg.reqId === reqId) {
+        window.removeEventListener("message", listener);
+        log({ about_api_result: { handle: h, status: msg.status, loc: msg.location, error: msg.error } });
+        resolve(msg.location || "");
+      }
+    };
+    window.addEventListener("message", listener);
+    window.postMessage({ type: "BTC_FETCH_ABOUT", handle: h, reqId }, "*");
+    setTimeout(() => {
+      window.removeEventListener("message", listener);
+      resolve("");
+    }, 12000);
+  });
+
+  aboutApiPromises.set(h, p);
+  return p;
 }
 
 function flagImgEl(iso2, className) {
@@ -281,6 +328,21 @@ async function getProfile(handle) {
       memProfile.set(h, resp.profile);
       return resp.profile;
     }
+
+    // Fallback to About API (account based in) to avoid visiting profile
+    const loc = await fetchAccountBasedLocationViaApi(h);
+    if (loc) {
+      const profile = { location: loc, locationIso2: loc, bio: "", ts: Date.now() };
+      memProfile.set(h, profile);
+      // Save to cache so future lookups are fast
+      chrome.runtime.sendMessage({
+        type: "SET_PROFILE",
+        handle: h,
+        profile: { location: loc, locationIso2: loc, bio: "", source: "about_api" }
+      }).catch(() => {});
+      return profile;
+    }
+
     return null;
   } catch {
     return null;
@@ -343,8 +405,9 @@ async function checkTweet(articleEl) {
     addOrUpdateBadge(articleEl, match.country, match.iso2, `Matched by profile location/bio`);
     blockWithPlaceholder(articleEl, match, handle, profile.location || "");
   } else {
-    // show badge based on profile (optional)
-    addOrUpdateBadge(articleEl, "Allowed", "??", `No rule match. Location: ${profile.location || "—"}`);
+    // Show badge based on profile (optional). Derive ISO from flag emoji if present.
+    const inferredIso = deriveIsoFromLocation(profile.location || "") || (profile.locationIso2 || "").trim() || "??";
+    addOrUpdateBadge(articleEl, profile.location || "Allowed", inferredIso, `No rule match. Location: ${profile.location || "—"}`);
   }
 
   maybeLog(handle, match, profile, true);
@@ -389,6 +452,7 @@ function scheduleObserve() {
 async function init() {
   await loadRulesAndPrefs();
   ensureStyle();
+  ensureAboutScriptInjected();
   observeTweets();
 
   const mo = new MutationObserver(scheduleObserve);
