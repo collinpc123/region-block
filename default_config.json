@@ -1,4 +1,4 @@
 {
   "rules": [],
-  "prefs": { "debug": false, "logOnce": true, "blockUnresolved": false }
+  "prefs": { "debug": false, "logOnce": true, "blockUnresolved": false, "customBannerText": "" }
 }

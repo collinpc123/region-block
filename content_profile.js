@@ -138,6 +138,32 @@ const aboutLocCache = new Map(); // handleLower -> Promise<string>
 const aboutApiPromises = new Map(); // handleLower -> Promise<string>
 let aboutScriptInjected = false;
 let aboutRateLimitUntilMs = 0;
+const blockedHandles = new Map();
+let blockedLoaded = false;
+
+async function loadBlockedHandles() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: "GET_BLOCKED_HANDLES" });
+    blockedHandles.clear();
+    Object.entries(resp?.blocked || {}).forEach(([h, entry]) => {
+      if (h) blockedHandles.set(h, entry);
+    });
+  } catch {}
+  if (!blockedHandles.size) {
+    try {
+      const res = await chrome.storage.local.get({ btc_blocked_handles_v1: {} });
+      Object.entries(res.btc_blocked_handles_v1 || {}).forEach(([h, entry]) => {
+        if (h) blockedHandles.set(h, entry);
+      });
+    } catch {}
+  }
+  blockedLoaded = true;
+}
+
+function getRememberedBlocked(handle) {
+  const h = String(handle || "").toLowerCase();
+  return blockedHandles.get(h) || null;
+}
 
 function ensureAboutScriptInjected() {
   if (aboutScriptInjected) return;
@@ -354,11 +380,24 @@ async function saveProfile(handle, profile) {
 
 async function runOnceAfterLoad() {
   if (!isXHost()) return;
+  if (!blockedLoaded) await loadBlockedHandles();
   const isProfile = looksLikeProfilePage();
   const isAbout = looksLikeAboutPage();
   if (!isProfile && !isAbout) return;
 
   const handle = getHandleFromPath();
+  const remembered = getRememberedBlocked(handle);
+  if (remembered) {
+    const iso = remembered.iso2 || isoFromLocationText(remembered.location || "");
+    console.log("[BTC-profile] handle remembered as blocked; skipping scrape", { handle, iso });
+    await saveProfile(handle, {
+      location: remembered.location || remembered.country || "",
+      locationIso2: iso,
+      bio: "",
+      source: "blocked_cache"
+    });
+    return;
+  }
   const aboutApiPromise = isProfile ? fetchAccountBasedLocationViaApi(handle) : Promise.resolve("");
   const aboutLocPromise = isProfile ? fetchAboutBasedLocation(handle) : Promise.resolve("");
   if (isProfile) observeAboutTooltip(handle);

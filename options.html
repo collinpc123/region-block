@@ -27,7 +27,10 @@
     <h2>Preferences</h2>
     <label><input type="checkbox" id="debug"> Debug logs</label><br>
     <label><input type="checkbox" id="logOnce"> Log once per handle</label><br>
-    <label><input type="checkbox" id="blockUnresolved"> Block when location unknown (not recommended)</label>
+    <label><input type="checkbox" id="blockUnresolved"> Block when location unknown (not recommended)</label><br>
+    <label>Custom banner text<br>
+      <input type="text" id="customBannerText" placeholder="Text shown above the counter (optional)">
+    </label>
   </section>
 
   <section class="card">
@@ -36,6 +39,15 @@
     <div class="row">
       <button id="clearCache">Clear profile cache</button>
       <button id="refreshStats">Refresh stats</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Blocked handles</h2>
+    <p class="muted">Recently blocked handles remembered locally (last 30 days).</p>
+    <div id="blockedList" class="mono small"></div>
+    <div class="row">
+      <button id="refreshBlocked">Refresh blocked list</button>
     </div>
   </section>
 

@@ -30,6 +30,15 @@ input[type="text"] {
   width: 100%;
   padding: 6px 8px;
 }
+.grid input[type="text"] {
+  width: 100%;
+}
+textarea {
+  width: 100%;
+  padding: 6px 8px;
+  min-height: 60px;
+  resize: vertical;
+}
 .muted { color: #555; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
 button { padding: 6px 10px; }

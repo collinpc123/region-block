@@ -16,6 +16,7 @@ const MAX_PENDING_PER_HANDLE = 25;
 // ---- caches (page lifetime) ----
 const memCache = new Map(); // handleLower -> {location,bio,ts,method,sourceUrl,status}
 const pendingByHandle = new Map(); // handleLower -> Set<articleEl>
+const blockedHandles = new Map(); // handleLower -> {ruleId,location,ts}
 const loggedHandles = new Set();
 
 // ---- queue ----
@@ -90,9 +91,87 @@ async function loadRules() {
   rules = (res.rules || []).filter(r => r && r.country);
 }
 
+async function loadBlockedHandles() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: "GET_BLOCKED_HANDLES" });
+    blockedHandles.clear();
+    Object.entries(resp?.blocked || {}).forEach(([h, entry]) => {
+      if (h) blockedHandles.set(h, entry);
+    });
+  } catch {}
+  if (!blockedHandles.size) {
+    try {
+      const res = await chrome.storage.local.get({ btc_blocked_handles_v1: {} });
+      Object.entries(res.btc_blocked_handles_v1 || {}).forEach(([h, entry]) => {
+        if (h) blockedHandles.set(h, entry);
+      });
+    } catch {}
+  }
+}
+
+async function persistBlockedLocally(handle, entry) {
+  try {
+    const res = await chrome.storage.local.get({ btc_blocked_handles_v1: {} });
+    const map = res.btc_blocked_handles_v1 || {};
+    map[handle] = entry;
+    const keys = Object.keys(map);
+    if (keys.length > 5000) {
+      const sorted = keys
+        .map(k => [k, map[k]?.ts || 0])
+        .sort((a, b) => a[1] - b[1])
+        .slice(keys.length - 5000);
+      const trimmed = Object.fromEntries(sorted.map(([k]) => [k, map[k]]));
+      await chrome.storage.local.set({ btc_blocked_handles_v1: trimmed });
+    } else {
+      await chrome.storage.local.set({ btc_blocked_handles_v1: map });
+    }
+  } catch {}
+}
+
 async function loadPrefs() {
   const res = await chrome.storage.sync.get({ prefs: { debug: true, logOnce: true } });
   prefs = res.prefs || { debug: true, logOnce: true };
+}
+
+function rememberBlocked(handle, rule, locationText) {
+  const h = String(handle || "").toLowerCase();
+  if (!h || !rule?.id) return;
+  blockedHandles.set(h, {
+    ruleId: rule.id,
+    location: locationText || "",
+    country: rule.country || "",
+    iso2: rule.iso2 || "",
+    nickname: rule.nickname || "",
+    ts: Date.now()
+  });
+  persistBlockedLocally(h, blockedHandles.get(h));
+  chrome.runtime.sendMessage({
+    type: "ADD_BLOCKED_HANDLE",
+    handle: h,
+    ruleId: rule.id,
+    location: locationText || "",
+    meta: {
+      country: rule.country || "",
+      iso2: rule.iso2 || "",
+      nickname: rule.nickname || ""
+    }
+  }).catch(() => {});
+}
+
+function getRememberedRule(handle) {
+  const h = String(handle || "").toLowerCase();
+  const entry = blockedHandles.get(h);
+  if (!entry || !entry.ruleId) return null;
+  const rule = rules.find(r => r.id === entry.ruleId) || {
+    id: entry.ruleId,
+    country: entry.country || "Blocked",
+    iso2: entry.iso2 || "??",
+    nickname: entry.nickname || entry.country || "Blocked",
+    enabled: true,
+    keywords: [],
+    scanBio: true
+  };
+  return { rule, location: entry.location || "" };
 }
 
 function ensureStyle() {
@@ -147,8 +226,106 @@ function ensureStyle() {
       font-weight: 700;
       font-size: 12px;
     }
+    .btc-actions { display: flex; gap: 8px; align-items: center; }
+    .btc-block-btn {
+      border-color: rgba(255, 102, 102, 0.8);
+      color: #b30000;
+      background: rgba(255, 102, 102, 0.08);
+    }
   `;
   document.head.appendChild(style);
+}
+
+const BLOCK_BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAv0Q6O5K5XFz1j/A//vN/i2QfJ9w=1Zv7ttfk8LF81IUq16jS3eAdJ2PHGJwZHo9TnA6Yl4";
+const BLOCK_URLS = [
+  "https://api.twitter.com/1.1/blocks/create.json",
+  "https://x.com/i/api/1.1/blocks/create.json"
+];
+
+let cachedCookies = { ct0: "", auth: "", ts: 0 };
+async function getSessionCookies() {
+  const now = Date.now();
+  if (cachedCookies.ct0 && cachedCookies.auth && now - cachedCookies.ts < 5 * 60 * 1000) {
+    return cachedCookies;
+  }
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: "GET_COOKIES" });
+    if (resp?.ct0 && resp?.authToken) {
+      cachedCookies = { ct0: resp.ct0, auth: resp.authToken, ts: now };
+      return cachedCookies;
+    }
+  } catch {}
+  // fallback to document.cookie if available
+  const mCt0 = document.cookie.match(/(?:^|; )ct0=([^;]+)/);
+  const mAuth = document.cookie.match(/(?:^|; )auth_token=([^;]+)/);
+  if (mCt0 && mAuth) {
+    cachedCookies = { ct0: decodeURIComponent(mCt0[1]), auth: decodeURIComponent(mAuth[1]), ts: now };
+    return cachedCookies;
+  }
+  return { ct0: "", auth: "", ts: now };
+}
+
+async function getAuthHeaders() {
+  let { ct0, auth } = await getSessionCookies();
+  if (!ct0 || !auth) {
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: "SYNC_COOKIES_TO_X" });
+      if (resp?.ct0 && resp?.authToken) {
+        ct0 = resp.ct0;
+        auth = resp.authToken;
+        cachedCookies = { ct0, auth, ts: Date.now() };
+      }
+    } catch {}
+  }
+  return {
+    csrf: ct0,
+    authToken: auth,
+    headers: {
+      accept: "application/json, text/plain, */*",
+      "authorization": `Bearer ${BLOCK_BEARER}`,
+      "x-csrf-token": ct0,
+      "x-twitter-active-user": "yes",
+      "x-twitter-auth-type": "OAuth2Session",
+      "x-twitter-client-language": document.documentElement.lang || "en",
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "origin": "https://x.com",
+      "referer": "https://x.com/"
+    }
+  };
+}
+
+async function blockUser(handle) {
+  const h = String(handle || "").replace(/^@/, "").trim();
+  if (!h) throw new Error("empty handle");
+  const { csrf, authToken, headers } = await getAuthHeaders();
+  if (!csrf || !authToken) throw new Error("missing session cookies (ct0/auth_token); open X in a tab and stay logged in.");
+
+  const body = `screen_name=${encodeURIComponent(h)}&skip_status=1&include_entities=false`;
+
+  let lastErr = null;
+  for (const url of BLOCK_URLS) {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body
+      });
+      if (!resp.ok) {
+        let detail = "";
+        try {
+          const j = await resp.json();
+          detail = j?.errors?.[0]?.message || "";
+        } catch {}
+        lastErr = new Error(`block failed (${resp.status}) ${detail}`.trim());
+        continue;
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("block failed");
 }
 
 function ruleMatches(rule, locationText, bioText) {
@@ -162,15 +339,13 @@ function ruleMatches(rule, locationText, bioText) {
   const locIso2s = extractFlagIso2s(locationText);
   const bioIso2s = extractFlagIso2s(bioText);
 
-  if (iso2 && (locIso2s.has(iso2) || (rule.scanBio && bioIso2s.has(iso2)))) return true;
+  if (iso2 && (locIso2s.has(iso2) || bioIso2s.has(iso2))) return true;
 
   if (country && loc.includes(country)) return true;
   for (const k of keywords) if (k && loc.includes(k)) return true;
 
-  if (rule.scanBio) {
-    if (country && bio.includes(country)) return true;
-    for (const k of keywords) if (k && bio.includes(k)) return true;
-  }
+  if (country && bio.includes(country)) return true;
+  for (const k of keywords) if (k && bio.includes(k)) return true;
 
   return false;
 }
@@ -243,9 +418,13 @@ function addOrUpdateBadge(articleEl, countryName, iso2) {
   badge.querySelector(".btc-country").textContent = countryName || "Unknown";
 }
 
-function blockWithPlaceholder(articleEl, countryName, iso2, handle, locationText) {
+function blockWithPlaceholder(articleEl, rule, handle, locationText) {
   if (articleEl.dataset.btcBlocked === "1") return;
   articleEl.dataset.btcBlocked = "1";
+
+  const countryName = rule?.country || "Unknown";
+  const iso2 = (rule?.iso2 || "").toUpperCase();
+  const customMessage = (rule?.customMessage || "").trim();
 
   const placeholder = document.createElement("div");
   placeholder.className = "btc-blocked-placeholder";
@@ -276,16 +455,21 @@ function blockWithPlaceholder(articleEl, countryName, iso2, handle, locationText
   left.appendChild(badge);
   left.appendChild(textWrap);
 
-  const btn = document.createElement("button");
-  btn.className = "btc-btn";
-  btn.textContent = "Show";
-  btn.addEventListener("click", () => {
+  const actions = document.createElement("div");
+  actions.className = "btc-actions";
+
+  const showBtn = document.createElement("button");
+  showBtn.className = "btc-btn";
+  showBtn.textContent = "Show";
+  showBtn.addEventListener("click", () => {
     placeholder.remove();
     articleEl.style.display = "";
   });
 
+  actions.appendChild(showBtn);
+
   placeholder.appendChild(left);
-  placeholder.appendChild(btn);
+  placeholder.appendChild(actions);
 
   articleEl.style.display = "none";
   articleEl.parentElement?.insertBefore(placeholder, articleEl);
@@ -423,8 +607,10 @@ function applyToTweet(articleEl, handleLower, prof) {
 
   if (rule) {
     addOrUpdateBadge(articleEl, rule.country, rule.iso2);
-    blockWithPlaceholder(articleEl, rule.country, rule.iso2, handleLower, location);
+    blockWithPlaceholder(articleEl, rule, handleLower, location);
 
+    const locForCache = location || bio || rule.country || "";
+    rememberBlocked(handleLower, rule, locForCache);
     chrome.runtime.sendMessage({ type: "INCREMENT_BLOCK_COUNT", country: rule.country }).catch(() => {});
   } else {
     // If you want badges for everyone, you need a country inference even for non-matches.
@@ -450,6 +636,14 @@ async function checkTweet(articleEl) {
   const handle = getHandleFromTweet(articleEl);
   if (!handle) return;
 
+  const remembered = getRememberedRule(handle);
+  if (remembered) {
+    ensureStyle();
+    addOrUpdateBadge(articleEl, remembered.rule.country, remembered.rule.iso2);
+    blockWithPlaceholder(articleEl, remembered.rule, handle, remembered.location || "");
+    return;
+  }
+
   // If already cached, apply immediately; else queue
   const h = handle.toLowerCase();
   const cached = memCache.get(h);
@@ -468,6 +662,7 @@ function scan() {
 
 async function init() {
   await loadRules();
+  await loadBlockedHandles();
   await loadPrefs();
 
   log("init", { rules, prefs });

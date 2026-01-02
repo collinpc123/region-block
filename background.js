@@ -7,9 +7,12 @@ const PREFS_KEY = "prefs";
 
 const PROFILE_CACHE_KEY = "btc_profile_cache_v1";
 const STATS_KEY = "btc_stats_v1";
+const BLOCKED_HANDLES_KEY = "btc_blocked_handles_v1";
 
 const CACHE_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const MAX_CACHE_ENTRIES = 5000;
+const BLOCK_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 days
+const MAX_BLOCKED_ENTRIES = 5000;
 
 function bgLog(...a) { console.log("[BTC-bg]", ...a); }
 function bgWarn(...a) { console.warn("[BTC-bg]", ...a); }
@@ -80,6 +83,44 @@ async function setStats(stats) {
   await chrome.storage.local.set({ [STATS_KEY]: stats });
 }
 
+async function getBlockedHandles() {
+  const res = await chrome.storage.local.get({ [BLOCKED_HANDLES_KEY]: {} });
+  const obj = res[BLOCKED_HANDLES_KEY] || {};
+  const now = now();
+  const cleaned = {};
+  for (const [h, entry] of Object.entries(obj)) {
+    if (!entry || !entry.ts) continue;
+    if (now - entry.ts > BLOCK_TTL_MS) continue;
+    cleaned[h] = entry;
+  }
+  if (Object.keys(cleaned).length !== Object.keys(obj).length) {
+    await chrome.storage.local.set({ [BLOCKED_HANDLES_KEY]: cleaned });
+  }
+  return cleaned;
+}
+
+async function addBlockedHandle(handle, ruleId, location, meta = {}) {
+  const h = String(handle || "").toLowerCase();
+  if (!h || !ruleId) return;
+  const blocked = await getBlockedHandles();
+  blocked[h] = {
+    ruleId,
+    location: location || "",
+    country: meta.country || "",
+    iso2: meta.iso2 || "",
+    nickname: meta.nickname || "",
+    ts: now()
+  };
+  const entries = Object.entries(blocked);
+  if (entries.length > MAX_BLOCKED_ENTRIES) {
+    entries.sort((a, b) => (a[1]?.ts || 0) - (b[1]?.ts || 0));
+    const trimmed = Object.fromEntries(entries.slice(entries.length - MAX_BLOCKED_ENTRIES));
+    await chrome.storage.local.set({ [BLOCKED_HANDLES_KEY]: trimmed });
+    return;
+  }
+  await chrome.storage.local.set({ [BLOCKED_HANDLES_KEY]: blocked });
+}
+
 async function incBlock({ country, ruleId, nickname, iso2 }) {
   const stats = await getStats();
   stats.totalBlocked = (stats.totalBlocked || 0) + 1;
@@ -113,6 +154,54 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     try {
       const prefs = await getPrefs();
       const debug = !!prefs.debug;
+
+      if (msg?.type === "GET_COOKIES") {
+        const urls = ["https://x.com", "https://twitter.com"];
+        const getCookieVal = async (name) => {
+          for (const url of urls) {
+            try {
+              const c = await chrome.cookies.get({ name, url });
+              if (c?.value) return c.value;
+            } catch {}
+          }
+          return "";
+        };
+        const ct0 = await getCookieVal("ct0");
+        const authToken = await getCookieVal("auth_token");
+        return sendResponse({ ok: !!(ct0 && authToken), ct0, authToken });
+      }
+
+      if (msg?.type === "GET_BLOCKED_HANDLES") {
+        const blocked = await getBlockedHandles();
+        return sendResponse({ ok: true, blocked });
+      }
+
+      if (msg?.type === "ADD_BLOCKED_HANDLE") {
+        await addBlockedHandle(msg.handle, msg.ruleId, msg.location, msg.meta || {});
+        return sendResponse({ ok: true });
+      }
+
+      if (msg?.type === "SYNC_COOKIES_TO_X") {
+        try {
+          const srcs = ["https://twitter.com", "https://x.com"];
+          const ct0 = (await chrome.cookies.get({ name: "ct0", url: srcs[0] }))?.value ||
+                      (await chrome.cookies.get({ name: "ct0", url: srcs[1] }))?.value ||
+                      "";
+          const auth = (await chrome.cookies.get({ name: "auth_token", url: srcs[0] }))?.value ||
+                       (await chrome.cookies.get({ name: "auth_token", url: srcs[1] }))?.value ||
+                       "";
+          const optsBase = { secure: true, httpOnly: false, sameSite: "no_restriction" };
+          if (ct0) {
+            await chrome.cookies.set({ ...optsBase, url: "https://x.com", name: "ct0", value: ct0, domain: ".x.com", path: "/" });
+          }
+          if (auth) {
+            await chrome.cookies.set({ ...optsBase, url: "https://x.com", name: "auth_token", value: auth, domain: ".x.com", path: "/" });
+          }
+          return sendResponse({ ok: !!(ct0 && auth), ct0, authToken: auth });
+        } catch (e) {
+          return sendResponse({ ok: false, error: String(e) });
+        }
+      }
 
       if (msg?.type === "GET_PROFILE") {
         const handle = String(msg.handle || "").toLowerCase().replace(/^@/, "").trim();

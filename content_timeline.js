@@ -42,6 +42,7 @@ const COUNTRY_SYNONYMS = {
 
 const memProfile = new Map(); // handleLower -> {location,bio,ts}
 const memPending = new Set(); // handleLower currently requesting
+const blockedHandles = new Map(); // handleLower -> {ruleId,location,ts}
 const loggedHandles = new Set();
 const aboutApiPromises = new Map(); // handleLower -> Promise<string>
 let aboutScriptInjected = false;
@@ -54,6 +55,8 @@ let io = null;
 let statsWidgetEl = null;
 let statsRefreshTimer = null;
 let lastProfileUpdateTick = 0;
+let statsContainerEl = null;
+let bannerEl = null;
 
 function log(...a) { if (prefs.debug) console.log("[BTC]", ...a); }
 function warn(...a) { if (prefs.debug) console.warn("[BTC]", ...a); }
@@ -220,14 +223,111 @@ function ensureStyle() {
     .btc-blocked-title{font-weight:700;font-size:13px;white-space:nowrap}
     .btc-blocked-sub{font-size:12px;opacity:.8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}
     .btc-btn{padding:6px 10px;border-radius:999px;border:1px solid rgba(120,120,120,.5);background:transparent;cursor:pointer;font-weight:700;font-size:12px}
-    .btc-stats{position:fixed;top:16px;right:16px;z-index:9999;background:rgba(0,0,0,0.82);color:#f5f5f5;border:1px solid rgba(255,255,255,0.2);border-radius:14px;padding:14px 16px;min-width:200px;backdrop-filter:blur(8px);font-size:13px;line-height:1.5;box-shadow:0 8px 24px rgba(0,0,0,0.45)}
-    .btc-stats-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;max-height:400px;overflow:auto}
-    .btc-stats-list li{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:4px 6px;border-radius:10px;background:rgba(255,255,255,0.06)}
-    .btc-stats-flag{font-size:18px;min-width:22px;text-align:center}
-    .btc-stats-country{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
-    .btc-stats-count{font-variant-numeric:tabular-nums;font-weight:800}
+    .btc-actions{display:flex;gap:8px;align-items:center}
+    .btc-block-btn{border-color:rgba(255,102,102,.8);color:#b30000;background:rgba(255,102,102,.08)}
+    .btc-stats-container{position:fixed;bottom:18px;left:18px;z-index:9999;display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+    .btc-banner{display:block;color:#ffecec;font-size:12px;line-height:1.4;margin-bottom:6px;padding:0}
+    .btc-banner a{color:#ff8a80;text-decoration:underline;font-weight:600}
+    .btc-stats{background:rgba(24,0,0,0.92);color:#f9d6d6;border:1px solid rgba(255,82,82,0.8);border-radius:12px;padding:12px 14px;min-width:220px;font-size:12px;line-height:1.4;box-shadow:0 12px 32px rgba(0,0,0,0.35)}
+    .btc-stats-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:4px;max-height:360px;overflow:auto}
+    .btc-stats-list li{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:6px 2px;border-bottom:1px solid rgba(255,82,82,0.35)}
+    .btc-stats-list li:last-child{border-bottom:none}
+    .btc-stats-flag{font-size:24px;min-width:20px;text-align:center;color:#ff6b6b}
+    .btc-stats-country{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:#ffecec}
+    .btc-stats-count{font-variant-numeric:tabular-nums;font-weight:800;color:#ff8a80}
   `;
   document.head.appendChild(style);
+}
+
+const BLOCK_BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAv0Q6O5K5XFz1j/A//vN/i2QfJ9w=1Zv7ttfk8LF81IUq16jS3eAdJ2PHGJwZHo9TnA6Yl4";
+const BLOCK_URLS = [
+  "https://api.twitter.com/1.1/blocks/create.json",
+  "https://x.com/i/api/1.1/blocks/create.json"
+];
+
+let cachedCookies = { ct0: "", auth: "", ts: 0 };
+async function getSessionCookies() {
+  const now = Date.now();
+  if (cachedCookies.ct0 && cachedCookies.auth && now - cachedCookies.ts < 5 * 60 * 1000) {
+    return cachedCookies;
+  }
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: "GET_COOKIES" });
+    if (resp?.ct0 && resp?.authToken) {
+      cachedCookies = { ct0: resp.ct0, auth: resp.authToken, ts: now };
+      return cachedCookies;
+    }
+  } catch {}
+  const mCt0 = document.cookie.match(/(?:^|; )ct0=([^;]+)/);
+  const mAuth = document.cookie.match(/(?:^|; )auth_token=([^;]+)/);
+  if (mCt0 && mAuth) {
+    cachedCookies = { ct0: decodeURIComponent(mCt0[1]), auth: decodeURIComponent(mAuth[1]), ts: now };
+    return cachedCookies;
+  }
+  return { ct0: "", auth: "", ts: now };
+}
+
+async function getAuthHeaders() {
+  let { ct0, auth } = await getSessionCookies();
+  if (!ct0 || !auth) {
+    try {
+      const resp = await chrome.runtime.sendMessage({ type: "SYNC_COOKIES_TO_X" });
+      if (resp?.ct0 && resp?.authToken) {
+        ct0 = resp.ct0;
+        auth = resp.authToken;
+        cachedCookies = { ct0, auth, ts: Date.now() };
+      }
+    } catch {}
+  }
+  return {
+    csrf: ct0,
+    authToken: auth,
+    headers: {
+      accept: "application/json, text/plain, */*",
+      "authorization": `Bearer ${BLOCK_BEARER}`,
+      "x-csrf-token": ct0,
+      "x-twitter-active-user": "yes",
+      "x-twitter-auth-type": "OAuth2Session",
+      "x-twitter-client-language": document.documentElement.lang || "en",
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "origin": "https://x.com",
+      "referer": "https://x.com/"
+    }
+  };
+}
+
+async function blockUser(handle) {
+  const h = String(handle || "").replace(/^@/, "").trim();
+  if (!h) throw new Error("empty handle");
+  const { csrf, authToken, headers } = await getAuthHeaders();
+  if (!csrf || !authToken) throw new Error("missing session cookies (ct0/auth_token); open X in a tab and stay logged in.");
+
+  const body = `screen_name=${encodeURIComponent(h)}&skip_status=1&include_entities=false`;
+
+  let lastErr = null;
+  for (const url of BLOCK_URLS) {
+    try {
+      const resp = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers,
+        body
+      });
+      if (!resp.ok) {
+        let detail = "";
+        try {
+          const j = await resp.json();
+          detail = j?.errors?.[0]?.message || "";
+        } catch {}
+        lastErr = new Error(`block failed (${resp.status}) ${detail}`.trim());
+        continue;
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("block failed");
 }
 
 async function loadRulesAndPrefs() {
@@ -252,6 +352,84 @@ async function loadRulesAndPrefs() {
   chrome.runtime.sendMessage({ type: "SET_RULE_META", ruleMeta }).catch(() => {});
 }
 
+async function loadBlockedHandles() {
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: "GET_BLOCKED_HANDLES" });
+    blockedHandles.clear();
+    Object.entries(resp?.blocked || {}).forEach(([h, entry]) => {
+      if (h) blockedHandles.set(h, entry);
+    });
+  } catch {}
+  if (!blockedHandles.size) {
+    try {
+      const res = await chrome.storage.local.get({ btc_blocked_handles_v1: {} });
+      Object.entries(res.btc_blocked_handles_v1 || {}).forEach(([h, entry]) => {
+        if (h) blockedHandles.set(h, entry);
+      });
+    } catch {}
+  }
+}
+
+async function persistBlockedLocally(handle, entry) {
+  try {
+    const res = await chrome.storage.local.get({ btc_blocked_handles_v1: {} });
+    const map = res.btc_blocked_handles_v1 || {};
+    map[handle] = entry;
+    const keys = Object.keys(map);
+    if (keys.length > 5000) {
+      const sorted = keys
+        .map(k => [k, map[k]?.ts || 0])
+        .sort((a, b) => a[1] - b[1])
+        .slice(keys.length - 5000);
+      const trimmed = Object.fromEntries(sorted.map(([k]) => [k, map[k]]));
+      await chrome.storage.local.set({ btc_blocked_handles_v1: trimmed });
+    } else {
+      await chrome.storage.local.set({ btc_blocked_handles_v1: map });
+    }
+  } catch {}
+}
+
+function rememberBlocked(handle, rule, locationText) {
+  const h = String(handle || "").toLowerCase();
+  if (!h || !rule?.id) return;
+  blockedHandles.set(h, {
+    ruleId: rule.id,
+    location: locationText || "",
+    country: rule.country || "",
+    iso2: rule.iso2 || "",
+    nickname: rule.nickname || "",
+    ts: Date.now()
+  });
+  persistBlockedLocally(h, blockedHandles.get(h));
+  chrome.runtime.sendMessage({
+    type: "ADD_BLOCKED_HANDLE",
+    handle: h,
+    ruleId: rule.id,
+    location: locationText || "",
+    meta: {
+      country: rule.country || "",
+      iso2: rule.iso2 || "",
+      nickname: rule.nickname || ""
+    }
+  }).catch(() => {});
+}
+
+function getRememberedRule(handle) {
+  const h = String(handle || "").toLowerCase();
+  const entry = blockedHandles.get(h);
+  if (!entry || !entry.ruleId) return null;
+  const rule = rules.find(r => r.id === entry.ruleId) || {
+    id: entry.ruleId,
+    country: entry.country || "Blocked",
+    iso2: entry.iso2 || "??",
+    nickname: entry.nickname || entry.country || "Blocked",
+    enabled: true,
+    keywords: [],
+    scanBio: true
+  };
+  return { rule, location: entry.location || "" };
+}
+
 function ruleMatches(rule, locationText, bioText) {
   const loc = norm(locationText);
   const bio = norm(bioText);
@@ -263,15 +441,13 @@ function ruleMatches(rule, locationText, bioText) {
   const locIso2s = extractFlagIso2s(locationText);
   const bioIso2s = extractFlagIso2s(bioText);
 
-  if (iso2 && (locIso2s.has(iso2) || (rule.scanBio && bioIso2s.has(iso2)))) return true;
+  if (iso2 && (locIso2s.has(iso2) || bioIso2s.has(iso2))) return true;
 
   if (country && loc.includes(country)) return true;
   for (const k of keywords) if (k && loc.includes(k)) return true;
 
-  if (rule.scanBio) {
-    if (country && bio.includes(country)) return true;
-    for (const k of keywords) if (k && bio.includes(k)) return true;
-  }
+  if (country && bio.includes(country)) return true;
+  for (const k of keywords) if (k && bio.includes(k)) return true;
 
   return false;
 }
@@ -351,6 +527,7 @@ function blockWithPlaceholder(articleEl, rule, handle, locationText) {
   if (articleEl.dataset.btcBlocked === "1") return;
   articleEl.dataset.btcBlocked = "1";
 
+  const countryName = rule.country || "Unknown";
   const ruleIso = (rule.iso2 || deriveIsoFromLocation(rule.country || "") || "??").toUpperCase();
 
   const placeholder = document.createElement("div");
@@ -364,7 +541,7 @@ function blockWithPlaceholder(articleEl, rule, handle, locationText) {
   const flagElSmall = flagImgEl(ruleIso, "btc-flag-img");
   const countrySpan = document.createElement("span");
   countrySpan.className = "btc-country";
-  countrySpan.textContent = rule.country || "Unknown";
+  countrySpan.textContent = countryName;
   badge.append(flagElSmall, countrySpan);
 
   const textWrap = document.createElement("div");
@@ -382,16 +559,21 @@ function blockWithPlaceholder(articleEl, rule, handle, locationText) {
   left.appendChild(badge);
   left.appendChild(textWrap);
 
-  const btn = document.createElement("button");
-  btn.className = "btc-btn";
-  btn.textContent = "Show";
-  btn.addEventListener("click", () => {
+  const actions = document.createElement("div");
+  actions.className = "btc-actions";
+
+  const showBtn = document.createElement("button");
+  showBtn.className = "btc-btn";
+  showBtn.textContent = "Show";
+  showBtn.addEventListener("click", () => {
     placeholder.remove();
     articleEl.style.display = "";
   });
 
+  actions.append(showBtn);
+
   placeholder.appendChild(left);
-  placeholder.appendChild(btn);
+  placeholder.appendChild(actions);
 
   articleEl.style.display = "none";
   articleEl.parentElement?.insertBefore(placeholder, articleEl);
@@ -518,6 +700,14 @@ async function checkTweet(articleEl) {
 
   ensureStyle();
 
+  const remembered = getRememberedRule(handle);
+  if (remembered) {
+    addOrUpdateBadge(articleEl, remembered.rule.country, remembered.rule.iso2, `Previously blocked`);
+    blockWithPlaceholder(articleEl, remembered.rule, handle, remembered.location || "");
+    maybeLog(handle, remembered.rule, { location: remembered.location || "" }, true);
+    return;
+  }
+
   const profile = await getProfile(handle);
 
   if (!profile) {
@@ -554,7 +744,9 @@ async function checkTweet(articleEl) {
 
   if (match) {
     addOrUpdateBadge(articleEl, match.country, match.iso2, `Matched by profile location/bio`);
+    const locForCache = profile.location || profile.bio || match.country || "";
     blockWithPlaceholder(articleEl, match, handle, profile.location || "");
+    rememberBlocked(handle, match, locForCache);
   } else {
     // Show badge based on profile (optional). Derive ISO from flag emoji if present.
     const inferredIso = (profile.locationIso2 || "").trim() || deriveIsoFromLocation(profile.location || profile.bio || "") || deriveIsoFromLocation(profile.country || "") || "??";
@@ -600,19 +792,54 @@ function scheduleObserve() {
   });
 }
 
+function ensureStatsContainer() {
+  if (statsContainerEl) return statsContainerEl;
+  statsContainerEl = document.createElement("div");
+  statsContainerEl.id = "btc-stats-container";
+  statsContainerEl.className = "btc-stats-container";
+  document.body.appendChild(statsContainerEl);
+  return statsContainerEl;
+}
+
 function ensureStatsWidget() {
   if (statsWidgetEl) return statsWidgetEl;
+  ensureStatsContainer();
   statsWidgetEl = document.createElement("div");
   statsWidgetEl.id = "btc-stats-widget";
   statsWidgetEl.className = "btc-stats";
   statsWidgetEl.innerHTML = `<ul class="btc-stats-list"></ul>`;
-  document.body.appendChild(statsWidgetEl);
+  statsContainerEl.appendChild(statsWidgetEl);
   return statsWidgetEl;
+}
+
+function ensureBanner() {
+  const raw = (prefs.customBannerText || "").trim();
+  const text = raw
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/&quot;/g, '"');
+  if (!text) {
+    if (bannerEl) {
+      bannerEl.remove();
+      bannerEl = null;
+    }
+    return null;
+  }
+  ensureStatsWidget();
+  if (!bannerEl) {
+    bannerEl = document.createElement("div");
+    bannerEl.id = "btc-custom-banner";
+    bannerEl.className = "btc-banner";
+    statsWidgetEl.prepend(bannerEl);
+  }
+  bannerEl.innerHTML = text;
+  return bannerEl;
 }
 
 async function refreshStatsWidget() {
   try {
     ensureStatsWidget();
+    ensureBanner();
     const [res, sync] = await Promise.all([
       chrome.runtime.sendMessage({ type: "GET_STATS" }),
       chrome.storage.sync.get({ [RULES_KEY]: [] })
@@ -680,6 +907,8 @@ function rerenderArticlesForHandle(handle) {
 
 async function init() {
   await loadRulesAndPrefs();
+  ensureBanner();
+  await loadBlockedHandles();
   ensureStyle();
   ensureAboutScriptInjected();
   ensureStatsWidget();
@@ -708,6 +937,7 @@ async function init() {
     }
     if (area === "sync" && changes.prefs) {
       prefs = changes.prefs.newValue || prefs;
+      ensureBanner();
       scheduleObserve();
     }
   });

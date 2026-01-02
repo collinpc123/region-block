@@ -14,7 +14,7 @@ function ruleTemplate() {
     emoji: "",
     iso2: "IL",
     keywords: ["israel", "tel aviv", "jerusalem"],
-    scanBio: false
+    customMessage: ""
   };
 }
 
@@ -54,6 +54,7 @@ async function load() {
   document.getElementById("debug").checked = !!prefs.debug;
   document.getElementById("logOnce").checked = !!prefs.logOnce;
   document.getElementById("blockUnresolved").checked = !!prefs.blockUnresolved;
+  document.getElementById("customBannerText").value = prefs.customBannerText || "";
 
   await refreshStats();
 }
@@ -88,8 +89,8 @@ function renderRules(rules) {
         el("label", {}, "Keywords"),
         el("input", { type: "text", class: "keywords", value: keywordsToString(r.keywords || []) }),
 
-        el("label", {}, "Scan bio"),
-        el("input", { type: "checkbox", class: "scanBio", checked: !!r.scanBio })
+        el("label", {}, "Custom block message"),
+        el("textarea", { class: "customMessage", placeholder: "Optional note shown when this rule blocks a tweet" }, r.customMessage || "")
       )
     );
 
@@ -126,14 +127,17 @@ async function save() {
       emoji: b.querySelector(".emoji").value.trim(),
       iso2: b.querySelector(".iso2").value.trim().toUpperCase(),
       keywords: parseKeywords(b.querySelector(".keywords").value),
-      scanBio: b.querySelector(".scanBio").checked
+      customMessage: b.querySelector(".customMessage").value.trim()
     };
   }).filter(r => r.country);
 
   const prefs = {
     debug: document.getElementById("debug").checked,
     logOnce: document.getElementById("logOnce").checked,
-    blockUnresolved: document.getElementById("blockUnresolved").checked
+    blockUnresolved: document.getElementById("blockUnresolved").checked,
+    customBannerText: document.getElementById("customBannerText").value.trim()
+      .replace(/\\"/g, '"')
+      .replace(/\\'/g, "'")
   };
 
   await chrome.storage.sync.set({ rules, prefs });
@@ -156,6 +160,35 @@ async function refreshStats() {
   }
 }
 
+async function refreshBlockedHandles() {
+  const el = document.getElementById("blockedList");
+  el.textContent = "Loading...";
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: "GET_BLOCKED_HANDLES" });
+    let blocked = resp?.blocked || {};
+    if (!Object.keys(blocked).length) {
+      const res = await chrome.storage.local.get({ btc_blocked_handles_v1: {} });
+      blocked = res.btc_blocked_handles_v1 || {};
+    }
+    const entries = Object.entries(blocked)
+      .map(([handle, info]) => ({ handle, ...info }))
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+      .slice(0, 200);
+    if (!entries.length) {
+      el.textContent = "None cached.";
+      return;
+    }
+    const lines = entries.map(e => {
+      const ts = e.ts ? new Date(e.ts).toLocaleString() : "";
+      const country = e.country || e.ruleId || "";
+      return `${e.handle}${country ? ` (${country})` : ""}${ts ? ` — ${ts}` : ""}`;
+    });
+    el.textContent = lines.join("\n");
+  } catch (e) {
+    el.textContent = `Failed to load blocked handles: ${String(e)}`;
+  }
+}
+
 async function clearCache() {
   await chrome.runtime.sendMessage({ type: "CLEAR_CACHE" });
   alert("Profile cache cleared.");
@@ -165,5 +198,6 @@ document.getElementById("addRule").addEventListener("click", addRule);
 document.getElementById("save").addEventListener("click", save);
 document.getElementById("refreshStats").addEventListener("click", refreshStats);
 document.getElementById("clearCache").addEventListener("click", clearCache);
+document.getElementById("refreshBlocked").addEventListener("click", refreshBlockedHandles);
 
-load();
+load().then(refreshBlockedHandles);
