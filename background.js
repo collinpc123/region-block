@@ -18,31 +18,40 @@ function bgLog(...a) { console.log("[BTC-bg]", ...a); }
 function bgWarn(...a) { console.warn("[BTC-bg]", ...a); }
 function now() { return Date.now(); }
 
-chrome.runtime.onInstalled.addListener(async () => {
-  bgLog("installed");
+async function seedDefaultsIfEmpty() {
+  try {
+    const sync = await chrome.storage.sync.get({
+      [RULES_KEY]: null,
+      [PREFS_KEY]: { debug: false, logOnce: true, blockUnresolved: false }
+    });
+    const currentRules = Array.isArray(sync[RULES_KEY]) ? sync[RULES_KEY] : null;
+    if (currentRules && currentRules.length) return;
 
-  // seed defaults if missing
-  const sync = await chrome.storage.sync.get({
-    [RULES_KEY]: null,
-    [PREFS_KEY]: { debug: false, logOnce: true, blockUnresolved: false }
-  });
-  if (!Array.isArray(sync[RULES_KEY])) {
-    try {
-      const resp = await fetch(chrome.runtime.getURL("default_config.json"));
-      const defaults = await resp.json();
-      if (Array.isArray(defaults.rules)) {
-        await chrome.storage.sync.set({ [RULES_KEY]: defaults.rules });
-      } else {
-        await chrome.storage.sync.set({ [RULES_KEY]: [] });
-      }
-      if (defaults.prefs) {
-        await chrome.storage.sync.set({ [PREFS_KEY]: defaults.prefs });
-      }
-    } catch (e) {
-      bgWarn("failed to load default_config.json", e);
+    const resp = await fetch(chrome.runtime.getURL("default_config.json"));
+    const defaults = await resp.json();
+    if (Array.isArray(defaults.rules)) {
+      await chrome.storage.sync.set({ [RULES_KEY]: defaults.rules });
+    } else {
+      await chrome.storage.sync.set({ [RULES_KEY]: [] });
+    }
+    if (defaults.prefs) {
+      await chrome.storage.sync.set({ [PREFS_KEY]: defaults.prefs });
+    }
+    bgLog("seeded defaults from default_config.json");
+  } catch (e) {
+    bgWarn("failed to seed defaults", e);
+    if (!(await chrome.storage.sync.get({ [RULES_KEY]: [] }))[RULES_KEY]?.length) {
       await chrome.storage.sync.set({ [RULES_KEY]: [] });
     }
   }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  seedDefaultsIfEmpty();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  seedDefaultsIfEmpty();
 });
 
 async function getPrefs() {
